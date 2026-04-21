@@ -44,6 +44,72 @@ Ensure you have Python 3.8+ installed. The project dependencies are listed in `r
 
 ## Usage
 
+### Frontend Prototype (Website UI)
+
+A frontend prototype has been added in the `web/` folder. It includes:
+
+- A 10-question personality quiz UI
+- Animated progress and transitions
+- Results view for trait profile and top genres
+- API integration hook to a backend endpoint (`POST /predict/full`)
+- Local fallback scoring if the backend is not running yet
+
+To run it quickly:
+
+1. Open `web/index.html` in your browser.
+2. Complete the quiz and view recommendations.
+
+If you run a backend at `http://127.0.0.1:8000`, the UI will automatically use real model predictions. Otherwise, it uses fallback client-side scoring so the experience still works during frontend development.
+
+### Full Web App (Model + Spotify Auth + Playlist Generation)
+
+The project now includes a FastAPI backend in `api/` and a frontend in `web/`.
+
+#### What it does
+
+- Uses 10-question personality input (1-5 each) from the frontend
+- Runs your trained model (`predict_with_scores`) to get ranked seed genres
+- Maps seed genres to Spotify-supported genre seeds
+- Uses Spotify OAuth (user login) to access user top artists/tracks
+- Combines model seed genres + user profile seeds to get recommendations
+- Creates a playlist in the user account and adds recommended tracks
+
+#### Spotify Developer Setup
+
+1. Create an app in Spotify Developer Dashboard.
+2. Set Redirect URI to:
+
+    `http://127.0.0.1:8000/spotify/callback`
+
+3. Set environment variables before running backend:
+
+```bash
+set SPOTIFY_CLIENT_ID=your_client_id
+set SPOTIFY_CLIENT_SECRET=your_client_secret
+set SPOTIFY_REDIRECT_URI=http://127.0.0.1:8000/spotify/callback
+```
+
+#### Run the app
+
+1. Make sure the model exists:
+
+```bash
+python models/personality/train.py
+```
+
+2. Start FastAPI server:
+
+```bash
+uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+3. Open this URL in browser:
+
+    `http://127.0.0.1:8000/`
+
+4. Complete the smiley quiz and see seed genres.
+5. Click **Connect Spotify**, sign in, then click **Create My Playlist**.
+
 ### Training the Model
 
 To train the personality-to-genre prediction model, run the `train.py` script. This will process the dataset, train a LightGBM multi-output classifier, evaluate its performance, and save the trained model artifacts to `personality_model.pkl`.
