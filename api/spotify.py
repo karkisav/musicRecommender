@@ -121,8 +121,16 @@ def get_user_top_artists(access_token: str, limit: int = 5) -> List[str]:
 
 
 def get_available_seed_genres(access_token: str) -> List[str]:
-    data = spotify_get(access_token, "/recommendations/available-genre-seeds")
-    return data.get("genres", [])
+    try:
+        data = spotify_get(access_token, "/recommendations/available-genre-seeds")
+        return data.get("genres", [])
+    except requests.HTTPError as exc:
+        # Spotify marks this endpoint as deprecated and some apps receive 404.
+        # Fall back to the known mapped seed genres so playlist flow can continue.
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            return sorted(set(MODEL_TO_SPOTIFY_GENRE.values()))
+        raise
 
 
 def map_model_genres_to_spotify(model_genres: List[str], available: List[str], max_count: int = 5) -> List[str]:
