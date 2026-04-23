@@ -15,6 +15,7 @@ from api.spotify import (
     add_tracks_to_playlist,
     build_login_url,
     create_playlist,
+    filter_recommendations_for_discovery,
     exchange_code_for_token,
     get_available_seed_genres,
     get_recommended_tracks,
@@ -22,6 +23,7 @@ from api.spotify import (
     get_user_top_artists,
     get_user_top_tracks,
     map_model_genres_to_spotify,
+    search_tracks_by_genres,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -158,6 +160,8 @@ def spotify_callback(
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
 
     expected_sid = state_data.get("sid")
+    if not isinstance(expected_sid, str) or not expected_sid:
+        raise HTTPException(status_code=400, detail="Invalid OAuth session state")
     frontend_return = state_data.get("frontend_return") or "http://127.0.0.1:8000/"
 
     sid = pp_session or expected_sid
@@ -205,10 +209,18 @@ def spotify_create_playlist(payload: PlaylistRequest, pp_session: str | None = C
         available = get_available_seed_genres(access_token)
         genre_seeds = map_model_genres_to_spotify(model_top, available, max_count=3)
 
-        # Pull more tracks so we can fall back to a top-tracks playlist if recommendations fail.
-        user_top_tracks = get_user_top_tracks(access_token, limit=max(payload.limit, 10))
-        top_tracks = user_top_tracks[:2]
-        top_artists = get_user_top_artists(access_token, limit=2)
+        # Pull enough profile data to filter familiar songs and artists out of recommendations.
+        user_top_tracks = get_user_top_tracks(access_token, limit=max(payload.limit, 50))
+        user_top_artists = get_user_top_artists(access_token, limit=50)
+        top_tracks: list[str] = []
+        top_artists: list[str] = []
+
+        # Favor genre-only discovery; only add a tiny personal anchor when genre seeds are scarce.
+        if len(genre_seeds) == 1 and user_top_artists:
+            top_artists = user_top_artists[:1]
+        elif not genre_seeds:
+            top_tracks = user_top_tracks[:2]
+            top_artists = user_top_artists[:2]
 
         # Keep total seeds <= 5 for Spotify recommendations.
         while len(genre_seeds) + len(top_tracks) + len(top_artists) > 5:
@@ -221,32 +233,48 @@ def spotify_create_playlist(payload: PlaylistRequest, pp_session: str | None = C
 
         recommendation_source = "spotify_recommendations"
         tracks = []
+        raw_recommendation_tracks = []
         try:
-            tracks = get_recommended_tracks(
+            raw_recommendation_tracks = get_recommended_tracks(
                 access_token=access_token,
                 seed_genres=genre_seeds,
                 seed_tracks=top_tracks,
                 seed_artists=top_artists,
-                limit=payload.limit,
+                limit=max(payload.limit * 2, 40),
             )
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else None
             # Spotify recommendations endpoints can fail for some apps/accounts.
-            # Fall back to the user's own top tracks rather than hard-failing the flow.
+            # Fall back to genre search rather than user's own top tracks.
             if status_code not in (400, 404):
                 raise
+
+        tracks = filter_recommendations_for_discovery(
+            raw_recommendation_tracks,
+            exclude_track_ids=user_top_tracks,
+            exclude_artist_ids=user_top_artists,
+            limit=payload.limit,
+        )
+
+        if not tracks and genre_seeds:
+            recommendation_source = "genre_search_fallback"
+            searched = search_tracks_by_genres(access_token, genre_seeds, limit=max(payload.limit * 2, 40))
+            tracks = filter_recommendations_for_discovery(
+                searched,
+                exclude_track_ids=user_top_tracks,
+                exclude_artist_ids=user_top_artists,
+                limit=payload.limit,
+            )
 
         if tracks:
             track_uris = [t["uri"] for t in tracks if t.get("uri")]
         else:
-            recommendation_source = "top_tracks_fallback"
-            fallback_track_ids = user_top_tracks[: payload.limit]
-            track_uris = [f"spotify:track:{track_id}" for track_id in fallback_track_ids if track_id]
+            track_uris = []
 
         if not track_uris:
             raise HTTPException(
                 status_code=400,
-                detail="Could not assemble playlist tracks from Spotify recommendations or top tracks.",
+                detail="Could not assemble playlist tracks from Spotify recommendations or genre search.",
             )
 
         user_id = session.get("user_id")
@@ -254,6 +282,8 @@ def spotify_create_playlist(payload: PlaylistRequest, pp_session: str | None = C
             profile = get_user_profile(access_token)
             user_id = profile.get("id")
             session["user_id"] = user_id
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Spotify user ID not found")
 
         playlist = create_playlist(
             access_token=access_token,
@@ -264,6 +294,8 @@ def spotify_create_playlist(payload: PlaylistRequest, pp_session: str | None = C
         )
 
         playlist_id = playlist.get("id")
+        if not playlist_id:
+            raise HTTPException(status_code=502, detail="Spotify did not return a playlist ID")
         add_tracks_to_playlist(access_token, playlist_id, track_uris)
     except requests.HTTPError as exc:
         raise HTTPException(status_code=502, detail=spotify_error_detail(exc)) from exc

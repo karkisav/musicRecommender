@@ -48,6 +48,8 @@ def build_login_url(redirect_uri: str) -> Tuple[str, str]:
         "show_dialog": "true",
     }
     req = requests.Request("GET", SPOTIFY_AUTH_URL, params=params).prepare()
+    if not req.url:
+        raise RuntimeError("Failed to build Spotify auth URL")
     return req.url, state
 
 
@@ -156,7 +158,7 @@ def get_recommended_tracks(
     if seeds_total == 0:
         return []
 
-    params = {
+    params: Dict[str, str | int] = {
         "limit": limit,
     }
     if seed_genres:
@@ -168,6 +170,90 @@ def get_recommended_tracks(
 
     data = spotify_get(access_token, "/recommendations", params=params)
     return data.get("tracks", [])
+
+
+def filter_recommendations_for_discovery(
+    tracks: List[Dict],
+    exclude_track_ids: List[str],
+    exclude_artist_ids: List[str],
+    limit: int,
+) -> List[Dict]:
+    excluded_tracks = set(exclude_track_ids)
+    excluded_artists = set(exclude_artist_ids)
+
+    filtered: List[Dict] = []
+    fallback_without_artist_filter: List[Dict] = []
+    seen_ids = set()
+
+    for track in tracks:
+        track_id = track.get("id")
+        if not track_id or track_id in seen_ids:
+            continue
+
+        artist_ids = {
+            artist.get("id")
+            for artist in track.get("artists", [])
+            if isinstance(artist, dict) and artist.get("id")
+        }
+
+        if track_id not in excluded_tracks:
+            fallback_without_artist_filter.append(track)
+
+        if track_id in excluded_tracks:
+            continue
+        if artist_ids and artist_ids.intersection(excluded_artists):
+            continue
+
+        filtered.append(track)
+        seen_ids.add(track_id)
+        if len(filtered) >= limit:
+            return filtered
+
+    if len(filtered) >= limit:
+        return filtered
+
+    for track in fallback_without_artist_filter:
+        track_id = track.get("id")
+        if not track_id or track_id in seen_ids:
+            continue
+        filtered.append(track)
+        seen_ids.add(track_id)
+        if len(filtered) >= limit:
+            break
+
+    return filtered
+
+
+def search_tracks_by_genres(access_token: str, seed_genres: List[str], limit: int = 30) -> List[Dict]:
+    if not seed_genres or limit <= 0:
+        return []
+
+    results: List[Dict] = []
+    seen = set()
+    per_genre = min(50, max(10, (limit // max(len(seed_genres), 1)) + 10))
+
+    for genre in seed_genres:
+        data = spotify_get(
+            access_token,
+            "/search",
+            params={
+                "q": f'genre:"{genre}"',
+                "type": "track",
+                "limit": per_genre,
+                "market": "from_token",
+            },
+        )
+
+        for item in data.get("tracks", {}).get("items", []):
+            track_id = item.get("id")
+            if not track_id or track_id in seen:
+                continue
+            results.append(item)
+            seen.add(track_id)
+            if len(results) >= limit:
+                return results
+
+    return results
 
 
 def create_playlist(access_token: str, user_id: str, name: str, description: str, is_public: bool) -> Dict:
